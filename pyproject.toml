@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "RamanMorph"
+version = "3.0.0"
+description = "Morphology-based evaluation of Raman spectra (RamanMorph 3.x)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {file = "LICENSE"}
+authors = [{name = "Vít Pavelka"}]
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.9",
+    "tqdm>=4.0",
+]
+
+[project.optional-dependencies]
+# WDF reading uses PyPI package "renishaw-wdf" which imports as module "wdf"
+wdf = ["renishaw-wdf>=1.4.0", "Pillow>=9"]  # Pillow only needed for EXIF/whitelight extras
+
+[project.urls]
+Homepage = "https://github.com/VitPavelka/RamanMorph"
+
+[tool.setuptools]
+package-dir = {"" = "RamanMorph3"}
+
+[tool.setuptools.packages.find]
+where  = ["RamanMorph3"]
+include = ["ramanmorph3*", "RamanMorph*"]
+exclude = ["tests*", "zz_legacy*"]
