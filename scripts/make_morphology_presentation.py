@@ -7,13 +7,14 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.animation import FFMpegWriter
+from matplotlib.animation import FFMpegWriter, PillowWriter
 from tqdm import tqdm
 
 from ramanmorph3.io import load_any
 from ramanmorph3.morphology import dilate_1d, erode_1d
-from ramanmorph3.morphology.interpolation import auto_atol, contact_indices, derive_peakline_and_baseline_1d
-from ramanmorph3.peaks.identification import characterize_peaks_1d
+from ramanmorph3.morphology.interpolation import auto_atol, contact_indices
+from ramanmorph3.peaks import find_peaks_1d
+from ramanmorph3.statistics import annotate_peaks_with_auc_and_roc
 
 
 @dataclass
@@ -58,22 +59,15 @@ def run_pipeline(x: np.ndarray, y: np.ndarray, hw_peak: int, hw_base: int) -> Sp
 	tails = contact_indices(y, y_ero_peak, atol=cmp_atol)
 	bases = contact_indices(y, y_ero_base, atol=cmp_atol)
 
-	peaks = characterize_peaks_1d(
-		y=y,
-		y_eroded_peak=y_ero_peak,
-		tips=tips,
-		tails=tails,
-		bases=bases,
-		use_wide_bases=not np.array_equal(y_ero_peak, y_ero_base),
-	)
-
-	peakline, baseline = derive_peakline_and_baseline_1d(
+	peaks, peakline, baseline = find_peaks_1d(
 		x=x,
 		y=y,
+		y_dilated=y_dil,
 		y_eroded_peak=y_ero_peak,
 		y_eroded_base=y_ero_base,
-		peaks=peaks,
-		refine=True,
+		refine_lines=True,
+		correct_boundaries=True,
+		compute_metrics=True,
 	)
 
 	return SpectrumRun(
@@ -189,7 +183,7 @@ def _sample_indices(n: int, step: int, max_frames: int) -> list[int]:
 	idx = list(range(0, n, max(1, step)))
 	if idx[-1] != n - 1:
 		idx.append(n - 1)
-	if len(idx) > max_frames:
+	if max_frames > 0 and len(idx) > max_frames:
 		sel = np.linspace(0, len(idx) - 1, max_frames).astype(int)
 		idx = [idx[i] for i in sel]
 	return idx
@@ -214,9 +208,13 @@ def _build_storyboard(run: SpectrumRun, step: int, max_frames: int) -> list[Fram
 	return frames
 
 
-def save_pipeline_video(run: SpectrumRun, out_dir: Path, step: int, max_frames: int, fps: int, hw_peak: int) -> Path:
-	storyboard = _build_storyboard(run, step=step, max_frames=max_frames)
-
+def _render_storyboard(
+		run: SpectrumRun,
+		storyboard: list[FrameInfo],
+		path: Path,
+		writer,
+		hw_peak: int,
+) -> None:
 	fig, ax = plt.subplots(figsize=(13, 6))
 	y_margin = (float(np.nanmax(run.y)) - float(np.nanmin(run.y))) * 0.08
 	ax.set_xlim(run.x[0], run.x[-1])
@@ -242,8 +240,8 @@ def save_pipeline_video(run: SpectrumRun, out_dir: Path, step: int, max_frames: 
 	apex_scatter = ax.scatter([], [], s=44, c="crimson", label="Accepted peaks")
 
 	cursor = ax.axvline(run.x[0], color="gray", lw=1.0, ls="--", alpha=0.65)
-	x0 = run.x[0]
-	window_span = ax.axvspan(x0, x0, color="red", alpha=0.14, label="Sliding window")
+	x0 = float(run.x[0])
+	window_span = ax.axvspan(x0, x0 + 1e-12, color="red", alpha=0.14, label="Sliding window")
 	status = ax.text(0.01, 0.98, "", transform=ax.transAxes, va="top", ha="left", fontsize=10)
 
 	ax.set_xlabel("Raman shift")
@@ -258,18 +256,17 @@ def save_pipeline_video(run: SpectrumRun, out_dir: Path, step: int, max_frames: 
 	prev_dil = -1
 	prev_ero = -1
 	prev_interp = -1
+
 	def set_window(center_idx: int) -> None:
 		l = max(0, center_idx - hw_peak)
 		r = min(run.y.size - 1, center_idx + hw_peak)
 		xl = float(min(run.x[l], run.x[r]))
 		xr = float(max(run.x[l], run.x[r]))
-		y0, y1 = ax.get_ylim()
-		window_span.set_xy(np.array([[xl, y0], [xl, y1], [xr, y1], [xr, y0], [xl, y0]]))
+		window_span.set_x(xl)
+		window_span.set_width(max(1e-12, xr - xl))
 
-	mp4_path = out_dir / "06_pipeline_animation.mp4"
-	writer = FFMpegWriter(fps=max(1, fps))
-	with writer.saving(fig, str(mp4_path), dpi=150):
-		for fr in tqdm(storyboard, desc="Rendering pipeline frames"):
+	with writer.saving(fig, str(path), dpi=150):
+		for fr in tqdm(storyboard, desc=f"Rendering {path.name}"):
 			i = fr.index
 
 			if fr.phase == "dilation":
@@ -312,18 +309,9 @@ def save_pipeline_video(run: SpectrumRun, out_dir: Path, step: int, max_frames: 
 			peakline_line.set_ydata(pl_built)
 			cursor.set_xdata([run.x[i], run.x[i]])
 
-			if tips_seen:
-				tips_xy = np.column_stack((run.x[tips_seen], run.y[tips_seen]))
-			else:
-				tips_xy = np.empty((0, 2))
-			if tails_seen:
-				tails_xy = np.column_stack((run.x[tails_seen], run.y[tails_seen]))
-			else:
-				tails_xy = np.empty((0, 2))
-			if bases_seen:
-				bases_xy = np.column_stack((run.x[bases_seen], run.y[bases_seen]))
-			else:
-				bases_xy = np.empty((0, 2))
+			tips_xy = np.column_stack((run.x[tips_seen], run.y[tips_seen])) if tips_seen else np.empty((0, 2))
+			tails_xy = np.column_stack((run.x[tails_seen], run.y[tails_seen])) if tails_seen else np.empty((0, 2))
+			bases_xy = np.column_stack((run.x[bases_seen], run.y[bases_seen])) if bases_seen else np.empty((0, 2))
 
 			tips_scatter.set_offsets(tips_xy)
 			tails_scatter.set_offsets(tails_xy)
@@ -333,13 +321,67 @@ def save_pipeline_video(run: SpectrumRun, out_dir: Path, step: int, max_frames: 
 				n_keep = max(1, int(np.ceil((fr.step_no / fr.total_steps) * apex_arr.size)))
 				curr = apex_arr[:n_keep]
 				apex_scatter.set_offsets(np.column_stack((run.x[curr], run.y[curr])))
-			elif apex_arr.size > 0 and fr.phase in {"interpolation"}:
+			elif apex_arr.size > 0 and fr.phase == "interpolation":
 				apex_scatter.set_offsets(np.column_stack((run.x[apex_arr], run.y[apex_arr])))
 
 			writer.grab_frame()
 
 	plt.close(fig)
-	return mp4_path
+
+
+def save_pipeline_videos(run: SpectrumRun, out_dir: Path, step: int, max_frames: int, fps: int, hw_peak: int) -> dict[str, Path]:
+	idx = _sample_indices(run.y.size, step=step, max_frames=max_frames)
+	full_storyboard = _build_storyboard(run, step=step, max_frames=max_frames)
+	dilation_storyboard = [FrameInfo("dilation", i, k + 1, len(idx)) for k, i in enumerate(idx)]
+	erosion_storyboard = [FrameInfo("erosion", i, k + 1, len(idx)) for k, i in enumerate(idx)]
+
+	paths = {
+		"full_mp4": out_dir / "06_pipeline_animation.mp4",
+		"full_gif": out_dir / "06_pipeline_animation.gif",
+		"dilation_mp4": out_dir / "07_dilation_only.mp4",
+		"dilation_gif": out_dir / "07_dilation_only.gif",
+		"erosion_mp4": out_dir / "08_erosion_only.mp4",
+		"erosion_gif": out_dir / "08_erosion_only.gif",
+	}
+
+	_render_storyboard(run, full_storyboard, paths["full_mp4"], FFMpegWriter(fps=max(1, fps)), hw_peak)
+	_render_storyboard(run, full_storyboard, paths["full_gif"], PillowWriter(fps=max(1, fps)), hw_peak)
+	_render_storyboard(run, dilation_storyboard, paths["dilation_mp4"], FFMpegWriter(fps=max(1, fps)), hw_peak)
+	_render_storyboard(run, dilation_storyboard, paths["dilation_gif"], PillowWriter(fps=max(1, fps)), hw_peak)
+	_render_storyboard(run, erosion_storyboard, paths["erosion_mp4"], FFMpegWriter(fps=max(1, fps)), hw_peak)
+	_render_storyboard(run, erosion_storyboard, paths["erosion_gif"], PillowWriter(fps=max(1, fps)), hw_peak)
+	return paths
+
+
+def save_auc_roc_diagram(run: SpectrumRun, out_dir: Path) -> None:
+	updated_peaks, stats = annotate_peaks_with_auc_and_roc(run.peaks, metric="area")
+	_ = updated_peaks
+
+	x = np.asarray(stats["peak_order"], dtype=float)
+	y = np.asarray(stats["peak_normal_areas"], dtype=float)
+	angles = np.asarray(stats["tangent_angle_deg"], dtype=float)
+	auc = float(stats["auc"])
+
+	fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+	ax1.plot(x, y, color="tab:purple", lw=2.0, label="Cumulative curve")
+	ax1.fill_between(x, y, color="tab:purple", alpha=0.2, label=f"AUC = {auc:.4f}")
+	ax1.set_ylabel("Cumulative contribution")
+	ax1.set_title("AUC diagram")
+	ax1.grid(alpha=0.2)
+	ax1.legend(loc="best")
+
+	ax2.plot(x, angles, color="tab:red", lw=1.8, label="Tangent angle (deg)")
+	ax2.axhline(stats["ok_tangent_point"], color="tab:orange", ls="--", lw=1.2, label="OK threshold")
+	ax2.axhline(stats["limit_tangent_point"], color="tab:green", ls="--", lw=1.2, label="Limit threshold")
+	ax2.set_xlabel("Peak rank (normalized)")
+	ax2.set_ylabel("Angle [deg]")
+	ax2.set_title("ROC/tangent-angle view")
+	ax2.grid(alpha=0.2)
+	ax2.legend(loc="best")
+
+	fig.tight_layout()
+	fig.savefig(out_dir / "09_auc_roc_diagram.png", dpi=180)
+	plt.close(fig)
 
 
 def main() -> None:
@@ -350,7 +392,7 @@ def main() -> None:
 	parser.add_argument("--hw-peak", type=int, default=10, help="Half-window for peak erosion/dilation")
 	parser.add_argument("--hw-base", type=int, default=15, help="Half-window for baseline erosion")
 	parser.add_argument("--step", type=int, default=1, help="Frame sampling step (1 = every spectral point)")
-	parser.add_argument("--max-frames", type=int, default=160, help="Maximum frames per long phase")
+	parser.add_argument("--max-frames", type=int, default=0, help="Maximum frames per long phase (0 = no cap)")
 	parser.add_argument("--fps", type=int, default=15, help="Animation FPS")
 	args = parser.parse_args()
 
@@ -369,9 +411,10 @@ def main() -> None:
 	save_filtered_peaks(run, args.out_dir)
 	save_final_lines(run, args.out_dir)
 	save_baseline_subtracted(run, args.out_dir)
+	save_auc_roc_diagram(run, args.out_dir)
 
-	print("Saving combined animation (single MP4)...")
-	video_path = save_pipeline_video(
+	print("Saving animations (MP4 + GIF, full + separate dilation/erosion)...")
+	video_paths = save_pipeline_videos(
 		run,
 		args.out_dir,
 		step=args.step,
@@ -383,7 +426,8 @@ def main() -> None:
 	print("Done.")
 	print(f"Output dir: {args.out_dir.resolve()}")
 	print(f"Peaks found: {len(run.peaks)}")
-	print(f"Animation: {video_path.name}")
+	for key, path in video_paths.items():
+		print(f"{key}: {path.name}")
 	print("\nGenerated key files:")
 	for name in [
 		"01_overview.png",
@@ -392,6 +436,12 @@ def main() -> None:
 		"04_peakline_final.png",
 		"05_baseline_subtracted.png",
 		"06_pipeline_animation.mp4",
+		"06_pipeline_animation.gif",
+		"07_dilation_only.mp4",
+		"07_dilation_only.gif",
+		"08_erosion_only.mp4",
+		"08_erosion_only.gif",
+		"09_auc_roc_diagram.png",
 	]:
 		p = args.out_dir / name
 		print(f" - {name}: {'OK' if p.exists() else 'missing'}")
