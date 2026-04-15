@@ -1,14 +1,15 @@
 # ramanmorph3/morphology/interpolation.py
 from __future__ import annotations
 
-from typing import Optional, Tuple, List, Sequence, Literal
+from typing import TYPE_CHECKING, Optional, Tuple, List, Sequence, Literal
 
 import numpy as np
 
 from ramanmorph3.logging_utils import get_logger
-from ramanmorph3.peaks.identification import Peak
-
 logger = get_logger(__name__)
+
+if TYPE_CHECKING:
+	from ramanmorph3.peaks.identification import Peak
 
 
 # --- Universal helpers ---
@@ -29,6 +30,74 @@ def auto_atol(y: np.ndarray, atol: Optional[float]) -> float:
 def contact_indices(y: np.ndarray, env: np.ndarray, *, atol: float) -> np.ndarray:
 	"""Indices where y touches env (within atol)."""
 	return np.flatnonzero(np.isclose(y, env, atol=atol, rtol=0.0)).astype(int)
+
+
+def linear_interpolation_1d(
+		x: np.ndarray,
+		y: np.ndarray,
+		envelope: np.ndarray,
+		*,
+		atol: Optional[float] = None,
+) -> np.ndarray:
+	"""
+	Interpolate a piecewise-linear line through contact points `y == envelope`.
+	Outside contact spans, `envelope` is kept as fallback.
+	"""
+	x = np.asarray(x)
+	y = np.asarray(y)
+	envelope = np.asarray(envelope)
+
+	if x.ndim != 1 or y.ndim != 1 or envelope.ndim != 1:
+		raise ValueError("linear_interpolation_1d expects 1D x, y and envelope.")
+	if not (x.size == y.size == envelope.size):
+		raise ValueError("x, y and envelope must have the same length.")
+
+	edges = contact_indices(y, envelope, atol=auto_atol(y, atol))
+	if edges.size == 0:
+		return envelope.astype(float, copy=True)
+
+	edges = np.unique(np.concatenate([edges, np.array([0, x.size - 1], dtype=int)]))
+	edges.sort()
+
+	return _piecewise_linear_through_points(x, y, edges, line=envelope)
+
+
+def linear_interpolation_nd(
+		x: np.ndarray,
+		y: np.ndarray,
+		envelope: np.ndarray,
+		*,
+		axis: int = -1,
+		atol: Optional[float] = None,
+) -> np.ndarray:
+	"""
+	Apply `linear_interpolation_1d` along one spectral axis for 1D/ND arrays.
+	"""
+	x = np.asarray(x)
+	y = np.asarray(y)
+	envelope = np.asarray(envelope)
+
+	if x.ndim != 1:
+		raise ValueError("x must be 1D.")
+	if y.shape != envelope.shape:
+		raise ValueError("y and envelope must have identical shapes.")
+	if y.shape[axis] != x.size:
+		raise ValueError("Spectral axis length must match len(x).")
+
+	y_m = np.moveaxis(y, axis, -1)
+	env_m = np.moveaxis(envelope, axis, -1)
+	spatial_shape = y_m.shape[:-1]
+	n_spec = y_m.shape[-1]
+
+	Y = y_m.reshape(-1, n_spec)
+	E = env_m.reshape(-1, n_spec)
+	out = np.empty_like(Y, dtype=float)
+
+	for i in range(Y.shape[0]):
+		out[i] = linear_interpolation_1d(x, Y[i], E[i], atol=atol)
+
+	out = out.reshape((*spatial_shape, n_spec))
+	return np.moveaxis(out, -1, axis)
 
 
 # --- Constraint smoothing Helpers ---

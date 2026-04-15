@@ -32,6 +32,11 @@ PEAK_DTYPE = np.dtype([
 ])
 
 
+def _float_or_nan(value: Any) -> float:
+	"""Convert Optional numeric values to float, mapping None to NaN."""
+	return float(np.nan if value is None else value)
+
+
 def _pack_peaks_any(peaks_any: Any) -> Dict[str, np.ndarray]:
 	"""
 	Pack peaks into (table, offsets, shape) arrays so we can store them in NPZ
@@ -58,7 +63,7 @@ def _pack_peaks_any(peaks_any: Any) -> Dict[str, np.ndarray]:
 	rows: List[tuple] = []
 
 	for i, plist in enumerate(cells):
-		plist = list(plist) if plist is not None else []
+		plist = _normalize_peak_list(plist)
 		offsets[i + 1] = offsets[i] + len(plist)
 
 		for p in plist:
@@ -67,8 +72,8 @@ def _pack_peaks_any(peaks_any: Any) -> Dict[str, np.ndarray]:
 				float(p.height), float(p.height_base), float(p.height_abs),
 				float(p.area), float(p.area_base), float(p.area_abs),
 				float(p.fwhm),
-				float(getattr(p, "auc_angle", np.nan)),
-				float(getattr(p, "roc", np.nan)),
+				_float_or_nan(getattr(p, "auc_angle", np.nan)),
+				_float_or_nan(getattr(p, "roc", np.nan)),
 			))
 
 	table = np.array(rows, dtype=PEAK_DTYPE) if rows else np.zeros((0,), dtype=PEAK_DTYPE)
@@ -78,6 +83,47 @@ def _pack_peaks_any(peaks_any: Any) -> Dict[str, np.ndarray]:
 		"peaks_offsets": offsets,
 		"peaks_shape": np.asarray(shape, dtype=np.int64),
 	}
+
+
+def _is_peak_like(obj: Any) -> bool:
+	"""Duck-typed check for Peak-like objects expected by NPZ packing."""
+	return all(hasattr(obj, attr) for attr in ("left_base", "left", "apex", "right", "right_base"))
+
+
+def _normalize_peak_list(plist: Any) -> List[Any]:
+	"""
+	Normalize a single cell to a list of Peak-like objects.
+
+	Supports:
+	  - None
+	  - Peak instance
+	  - list/tuple/ndarray of Peak instances
+	"""
+	if plist is None:
+		return []
+
+	if _is_peak_like(plist):
+		return [plist]
+
+	if isinstance(plist, np.ndarray):
+		if plist.ndim == 0:
+			item = plist.item()
+			if _is_peak_like(item):
+				return [item]
+			raise TypeError(f"Unsupported scalar value in peaks cell: {type(item)!r}")
+		return list(plist.tolist())
+
+	try:
+		items = list(plist)
+	except TypeError:
+		if _is_peak_like(plist):
+			return [plist]
+		raise TypeError(f"Unsupported peaks cell type: {type(plist)!r}")
+
+	for p in items:
+		if not _is_peak_like(p):
+			raise TypeError(f"Unsupported item in peaks collection: {type(p)!r}")
+	return items
 
 
 def _unpack_peaks(table: np.ndarray, offsets: np.ndarray, shape: tuple[int, ...]) -> Any:
