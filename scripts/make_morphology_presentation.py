@@ -364,6 +364,7 @@ def save_auc_roc_diagram(run: SpectrumRun, out_dir: Path) -> None:
 
 	fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
 	ax1.plot(x, y, color="tab:purple", lw=2.0, label="Cumulative curve")
+	ax1.scatter(x, y, s=34, color="tab:purple", edgecolor="white", linewidth=0.7, zorder=3, label="Signal points")
 	ax1.fill_between(x, y, color="tab:purple", alpha=0.2, label=f"AUC = {auc:.4f}")
 	ax1.set_ylabel("Cumulative contribution")
 	ax1.set_title("AUC diagram")
@@ -371,6 +372,7 @@ def save_auc_roc_diagram(run: SpectrumRun, out_dir: Path) -> None:
 	ax1.legend(loc="best")
 
 	ax2.plot(x, angles, color="tab:red", lw=1.8, label="Tangent angle (deg)")
+	ax2.scatter(x, angles, s=30, color="tab:red", edgecolor="white", linewidth=0.6, zorder=3, label="Signal points")
 	ax2.axhline(stats["ok_tangent_point"], color="tab:orange", ls="--", lw=1.2, label="OK threshold")
 	ax2.axhline(stats["limit_tangent_point"], color="tab:green", ls="--", lw=1.2, label="Limit threshold")
 	ax2.set_xlabel("Peak rank (normalized)")
