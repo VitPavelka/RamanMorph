@@ -208,7 +208,7 @@ def save_pipeline_video(run: SpectrumRun, out_dir: Path, step: int, max_frames: 
 	ax.set_xlim(run.x[0], run.x[-1])
 	ax.set_ylim(float(np.nanmin(run.y)) - y_margin, float(np.nanmax(run.y)) + y_margin)
 
-	raw_line, = ax.plot(run.x, run.y, color="black", lw=1.2, label="Raw spectrum")
+	ax.plot(run.x, run.y, color="black", lw=1.2, label="Raw spectrum")
 	dil_built = np.full(run.y.shape, np.nan, dtype=float)
 	ero_built = np.full(run.y.shape, np.nan, dtype=float)
 	pl_built = np.full(run.y.shape, np.nan, dtype=float)
@@ -241,28 +241,42 @@ def save_pipeline_video(run: SpectrumRun, out_dir: Path, step: int, max_frames: 
 	tips_set = set(int(i) for i in run.tips.tolist())
 	tails_set = set(int(i) for i in run.tails.tolist())
 	bases_set = set(int(i) for i in run.bases.tolist())
+	prev_dil = -1
+	prev_ero = -1
+	prev_interp = -1
 	frames: list[Image.Image] = []
 
 	for fr in tqdm(storyboard, desc="Rendering pipeline frames"):
 		i = fr.index
 
 		if fr.phase == "dilation":
-			dil_built[i] = run.y_dil[i]
-			if i in tips_set and i not in tips_seen:
-				tips_seen.append(i)
+			a = prev_dil + 1
+			b = i
+			dil_built[a:b + 1] = run.y_dil[a:b + 1]
+			for j in range(a, b + 1):
+				if j in tips_set and j not in tips_seen:
+					tips_seen.append(j)
+			prev_dil = i
 			status.set_text(f"Phase: dilation {fr.step_no}/{fr.total_steps}\nTouch -> tip candidate")
 		elif fr.phase == "erosion":
-			ero_built[i] = run.y_ero_peak[i]
-			if i in tails_set and i not in tails_seen:
-				tails_seen.append(i)
-			if i in bases_set and i not in bases_seen:
-				bases_seen.append(i)
+			a = prev_ero + 1
+			b = i
+			ero_built[a:b + 1] = run.y_ero_peak[a:b + 1]
+			for j in range(a, b + 1):
+				if j in tails_set and j not in tails_seen:
+					tails_seen.append(j)
+				if j in bases_set and j not in bases_seen:
+					bases_seen.append(j)
+			prev_ero = i
 			status.set_text(f"Phase: erosion {fr.step_no}/{fr.total_steps}\nTouch -> tail/base candidate")
 		elif fr.phase == "filter":
 			status.set_text(f"Phase: candidate filtering {fr.step_no}/{fr.total_steps}\nNon-peaks removed")
 		elif fr.phase == "interpolation":
-			pl_built[i] = run.peakline[i]
-			bl_built[i] = run.baseline[i]
+			a = prev_interp + 1
+			b = i
+			pl_built[a:b + 1] = run.peakline[a:b + 1]
+			bl_built[a:b + 1] = run.baseline[a:b + 1]
+			prev_interp = i
 			status.set_text(f"Phase: interpolation {fr.step_no}/{fr.total_steps}\nBuilding peakline/baseline")
 
 		dil_line.set_ydata(dil_built)
